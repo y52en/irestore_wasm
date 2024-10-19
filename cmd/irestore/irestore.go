@@ -3,19 +3,14 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
-	"encoding/base64"
-	"time"
 	"reflect"
+	"time"
 
 	"bytes"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
-	"os"
-	"path"
 	"strings"
-	"syscall"
 
 	"crypto/aes"
 
@@ -24,7 +19,8 @@ import (
 	"github.com/y52en/irestore_wasm/crypto/gcm"
 	"github.com/y52en/irestore_wasm/encoding/asn1"
 	"github.com/dunhamsteve/plist"
-	"golang.org/x/crypto/ssh/terminal"
+
+	"syscall/js"
 )
 
 // Quick and Dirty error handling - when I don't expect an error, but want to know if it happens
@@ -40,36 +36,11 @@ func dumpJSON(x interface{}) {
 	fmt.Println(string(json))
 }
 
-func getpass() string {
-	fmt.Fprint(os.Stderr, "Backup Password: ")
-	pw, err := terminal.ReadPassword(int(syscall.Stdin))
-	must(err)
-	fmt.Println()
-	return string(pw)
-}
-
-func domains(db *backup.MobileBackup) {
-	for _, domain := range db.Domains() {
-		fmt.Println(domain)
-	}
-}
-func apps(db *backup.MobileBackup) {
-	for app := range db.Manifest.Applications {
-		fmt.Println(app)
-	}
-}
-
-func list(db *backup.MobileBackup, domain string) {
-	for _, rec := range db.Records {
-		// just files for now
-		if rec.Length > 0 {
-			if domain == "*" {
-				fmt.Println(rec.Domain, rec.Path)
-			} else if domain == rec.Domain {
-				fmt.Println(rec.Path)
-			}
-		}
-	}
+func jsUint8ArrayToBytes(array js.Value) []byte {
+	length := array.Get("length").Int()
+	bytes := make([]byte, length)
+	js.CopyBytesToGo(bytes, array)
+	return bytes
 }
 
 type KCEntry struct {
@@ -182,265 +153,143 @@ func dumpKeyGroup(db *backup.MobileBackup, group []KCEntry) []interface{} {
 	return rval
 }
 
-func dumpkeys(db *backup.MobileBackup, outfile string) {
-	for _, rec := range db.Records {
-		if rec.Domain == "KeychainDomain" && rec.Path == "keychain-backup.plist" {
-			fmt.Println(rec)
-			data, err := db.ReadFile(rec)
-			must(err)
-
-			fmt.Println("read", len(data))
-			var v Keychain
-			err = plist.Unmarshal(bytes.NewReader(data), &v)
-			must(err)
-
-			dump := make(map[string][]interface{})
-			dump["General"] = dumpKeyGroup(db, v.General)
-			dump["Internet"] = dumpKeyGroup(db, v.Internet)
-			dump["Certs"] = dumpKeyGroup(db, v.Certs)
-			dump["Keys"] = dumpKeyGroup(db, v.Keys)
-			s, err := json.MarshalIndent(dump, "", "  ")
-			must(err)
-			if outfile != "" {
-				err = ioutil.WriteFile(outfile, s, 0644)
-				must(err)
-			} else {
-				_, err = os.Stdout.Write(s)
-				must(err)
-			}
-		}
-	}
-}
-
-func unparseRecord(record map[string]interface{}) []byte {
-	var v EntrySET
-
-	keys := strings.Split(fmt.Sprint(record["_fieldOrder"]), ",")
-	types := strings.Split(fmt.Sprint(record["_fieldTypes"]), ",")
-
-	for index, key := range keys {
-		if (strings.HasPrefix(key, "_")) {
-			continue
-		}
-
-		var entry Entry
-		entry.Key = key
-
-		switch types[index] {
-		case "int64":
-			entry.Value = int(record[key].(float64))
-		case "string":
-			entry.Value = record[key].(string)
-		case "time.Time":
-			const formatStr = "2006-01-02T15:04:05.999999999Z"
-			t, _ := time.Parse(formatStr, record[key].(string))
-			entry.Value = t
-		default:
-			value, _ := base64.StdEncoding.DecodeString(record[key].(string))
-			entry.Value = value
-		}
-
-		v = append(v, entry)
-	}
-
-	entries, err := asn1.Marshal(v)
-	if err != nil {
-		fmt.Println("Error marshaling record:", err)
-	}
-
-	return entries
-}
-
-func encryptKeyGroup(db *backup.MobileBackup, group interface {}, class string) []KCEntry {
-	var rval []KCEntry
-
-	if (group == nil) {
-		return rval
-	}
-
-	for _, record := range group.([]interface{}) {
-		var entry KCEntry
-
-		recordObject := record.(map[string]interface{})
-
-		ckey := db.Keybag.GetClassKey(uint32(recordObject["_class"].(float64)))
-		wkey, _ := base64.StdEncoding.DecodeString(recordObject["_wkey"].(string))
-		key := aeswrap.Unwrap(ckey, wkey)
-
-		c, err := aes.NewCipher(key)
-		must(err)
-	
-		gcm, err := gcm.NewGCM(c)
-		must(err)
-	
-		unparsed := unparseRecord(recordObject)
-
-		nonce := []byte{}
-		ciphertext := gcm.Seal(nil, nonce, unparsed, nil)
-
-		data := make([]byte, 12)
-		le.PutUint32(data, uint32(recordObject["_version"].(float64)))
-		le.PutUint32(data[4:], uint32(recordObject["_class"].(float64)))
-		le.PutUint32(data[8:], uint32(recordObject["_length"].(float64)))
-		data = append(data, wkey...)
-		data = append(data, ciphertext...)
-
-		entry.Data = data
-		ref, _ := base64.StdEncoding.DecodeString(recordObject["_ref"].(string))
-		entry.Ref = ref
-		
-		rval = append(rval, entry)
-	}
-
-	return rval
-}
-
-func encryptkeys(db *backup.MobileBackup, keys string, outfile string) {
-	jsonFile, err := os.Open(keys)
-	must(err)
-
-	defer jsonFile.Close()
-
-	jsonBytes, _ := ioutil.ReadAll(jsonFile)
-	jsonMap := make(map[string](interface{}))
-	json.Unmarshal([]byte(jsonBytes), &jsonMap)
-
-	path := os.ExpandEnv(outfile)
-	plistFile, err := os.Create(path)
-	must(err)
-
-	defer plistFile.Close()
-
-	emptyPlist := []byte{98, 112, 108, 105, 115, 116, 48, 48, 208, 8, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9}
-	_, err = plistFile.Write(emptyPlist)
-	must(err)
-
+func dumpKey(db *backup.MobileBackup, keychainPlist []byte, keyType string, key string) ([]byte, error) {
 	var v Keychain
-	err = plist.Unmarshal(plistFile, v)
-	must(err)
+	err := plist.Unmarshal(bytes.NewReader(keychainPlist), &v)
+	if err != nil {
+		return nil, err
+	}
 
-	v.General = encryptKeyGroup(db, jsonMap["General"], "genp")
-	v.Internet = encryptKeyGroup(db, jsonMap["Internet"], "inet")
-	v.Certs = encryptKeyGroup(db, jsonMap["Certs"], "cert")
-	v.Keys = encryptKeyGroup(db, jsonMap["Keys"], "keys")
+	var group []KCEntry
+	switch keyType {
+	case "General":
+		group = v.General
+	case "Internet":
+		group = v.Internet
+	case "Certs":
+		group = v.Certs
+	case "Keys":
+		group = v.Keys
+	default:
+		return nil, fmt.Errorf("Unknown key type %s", keyType)
+	}
+	dumped := dumpKeyGroup(db, group)
 
-	out, err := plist.Marshal(v)
-	must(err)
-
-	err = ioutil.WriteFile(path, out, 0644)
-	must(err)
-}
-
-func restore(db *backup.MobileBackup, domain string, dest string, decryptedManifest []byte) {
-	var err error
-	var total int64
-
-	err = os.MkdirAll(os.Args[4], 0755)
-	must(err)
-
-	err = os.WriteFile(path.Join(os.Args[4], "Manifest.db"), decryptedManifest, 0644)
-	must(err)
-
-	for _, rec := range db.Records {
-		if rec.Length > 0 {
-			var outPath string
-			if domain == "*" {
-				outPath = path.Join(dest, rec.Domain, rec.Path)
-			} else if rec.Domain == domain {
-				outPath = path.Join(dest, rec.Path)
-			}
-
-			if outPath != "" {
-				fmt.Println(rec.Path)
-
-				dir := path.Dir(outPath)
-				err = os.MkdirAll(dir, 0755)
-				must(err)
-				r, err := db.FileReader(rec)
-				if err != nil {
-					log.Println("error reading file", rec, err)
-					continue
-				}
-				must(err)
-				w, err := os.Create(outPath)
-				must(err)
-				n, err := io.Copy(w, r)
-				total += n
-				r.Close()
-				w.Close()
-			}
+	var dump interface{}
+	for _, entry := range dumped {
+		if entry.(map[string]interface{})["acct"] == key {
+			dump = entry
+			break
 		}
 	}
-	fmt.Println("Wrote", total, "bytes")
+
+	s, err := json.Marshal(dump)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func dumpKeys(db *backup.MobileBackup, keychainPlist []byte) []byte {
+	var v Keychain
+	err := plist.Unmarshal(bytes.NewReader(keychainPlist), &v)
+	must(err)
+
+	dump := make(map[string][]interface{})
+	dump["General"] = dumpKeyGroup(db, v.General)
+	dump["Internet"] = dumpKeyGroup(db, v.Internet)
+	dump["Certs"] = dumpKeyGroup(db, v.Certs)
+	dump["Keys"] = dumpKeyGroup(db, v.Keys)
+	s, err := json.Marshal(dump)
+	must(err)
+
+	return s
+}
+
+func returnErrorJSON(err error) string {
+	j, err := json.Marshal(map[string]string{
+		"result": "error",
+		"error":  err.Error(),
+	})
+	if err != nil {
+		return `{"result": "error", "error": "Error json encoding error"}`
+	}
+	return string(j)
+}
+
+func returnSuccessJSON(data []byte) string {
+	j, err := json.Marshal(map[string]string{
+		"result": "success",
+		"data":   string(data),
+	})
+	if err != nil {
+		return returnErrorJSON(err)
+	}
+	return string(j)
+}
+
+func wrapperDumpKey(this js.Value, args []js.Value) any {
+	if len(args) < 5 {
+		return returnErrorJSON(fmt.Errorf("Error: Arguments required"))
+	}
+	keychain := jsUint8ArrayToBytes(args[0])
+	manifest := jsUint8ArrayToBytes(args[1])
+	password := args[2].String()
+	keyType := args[3].String()
+	key := args[4].String()
+
+	db, err := backup.Open(manifest)
+	if err != nil {
+		return returnErrorJSON(err)
+	}
+
+	if db.Manifest.IsEncrypted {
+		err = db.SetPassword(password)
+		if err != nil {
+			return returnErrorJSON(err)
+		}
+	}
+
+	s, err := dumpKey(db, keychain, keyType, key)
+	if err != nil {
+		return returnErrorJSON(err)
+	}
+
+	return returnSuccessJSON(s)
+}
+
+func wrapperDumpKeys(this js.Value, args []js.Value) any {
+	if len(args) < 4 {
+		return returnErrorJSON(fmt.Errorf("Error: Arguments required"))
+	}
+	keychain := jsUint8ArrayToBytes(args[0])
+	manifest := jsUint8ArrayToBytes(args[1])
+	password := args[2].String()
+
+	db, err := backup.Open(manifest)
+	if err != nil {
+		return returnErrorJSON(err)
+	}
+
+	if db.Manifest.IsEncrypted {
+		err = db.SetPassword(password)
+		if err != nil {
+			return returnErrorJSON(err)
+		}
+	}
+
+	js.CopyBytesToJS(
+		args[3],
+		dumpKeys(db, keychain),
+	)
+	return returnSuccessJSON([]byte{})
 }
 
 func main() {
-	help := func() {
-		fmt.Println(`Usage:
-    ls [domain]
-    restore domain dest
-    dumpkeys [outputfile]
-    encryptkeys [inputfile] [outputfile]
-    apps`)
-	}
+	c := make(chan struct{})
 
-	var selected *backup.Backup
+	js.Global().Set("dumpKey", js.FuncOf(wrapperDumpKey))
+	js.Global().Set("dumpKeys", js.FuncOf(wrapperDumpKeys))
 
-	if len(os.Args) > 1 {
-		backupPath := os.Args[1]
-		selected = &backup.Backup{DeviceName: "", FileName: backupPath}
-	} else {
-		help()
-		return
-	}
-
-	db, err := backup.Open(selected.FileName)
-	must(err)
-
-	if db.Manifest.IsEncrypted {
-		err = db.SetPassword(getpass())
-		must(err)
-	}
-
-	decryptedManifest, err := db.Load()
-	must(err)
-	if len(os.Args) < 2 {
-		for _, domain := range db.Domains() {
-			fmt.Println(domain)
-		}
-		return
-	}
-
-	var cmd string
-	if len(os.Args) > 2 {
-		cmd = os.Args[2]
-	}
-	switch cmd {
-	case "ls", "list":
-		if len(os.Args) > 3 {
-			list(db, os.Args[3])
-		} else {
-			domains(db)
-		}
-	case "restore":
-		if len(os.Args) > 4 {
-			restore(db, os.Args[3], os.Args[4], decryptedManifest)
-		} else {
-			help()
-		}
-	case "apps":
-		apps(db)
-	case "dumpkeys":
-		var out string
-		if len(os.Args) > 3 {
-			out = os.Args[3]
-		}
-		dumpkeys(db, out)
-	case "encryptkeys":
-		if len(os.Args) > 4 {
-			encryptkeys(db, os.Args[3], os.Args[4])
-		}
-	default:
-		help()
-	}
+	<-c
 }

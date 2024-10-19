@@ -352,17 +352,9 @@ type Backup struct {
 }
 
 // Opens a MobileBackup directory
-func Open(backupPath string) (*MobileBackup, error) {
+func Open(manifestPlist []byte) (*MobileBackup, error) {
 	var backup MobileBackup
-
-	backup.Dir = backupPath
-	tmp := path.Join(backup.Dir, "Manifest.plist")
-	r, err := os.Open(tmp)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	err = plist.Unmarshal(r, &backup.Manifest)
+	err := plist.Unmarshal(bytes.NewReader(manifestPlist), &backup.Manifest)
 	if err != nil {
 		return nil, err
 	}
