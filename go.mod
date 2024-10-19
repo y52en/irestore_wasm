@@ -1,14 +1,15 @@
-module github.com/dnicolson/irestore
+module github.com/y52en/irestore_wasm
 
-go 1.18
+go 1.23
 
 require (
+	github.com/dnicolson/irestore v0.2.0
 	github.com/dunhamsteve/plist v0.0.0-20211213035615-a528b51ff82f
-	github.com/mattn/go-sqlite3 v1.14.15
-	golang.org/x/crypto v0.0.0-20220924013350-4ba4fb4dd9e7
+	github.com/mattn/go-sqlite3 v1.14.24
+	golang.org/x/crypto v0.28.0
 )
 
 require (
-	golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1 // indirect
-	golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1 // indirect
+	golang.org/x/sys v0.26.0 // indirect
+	golang.org/x/term v0.25.0 // indirect
 )

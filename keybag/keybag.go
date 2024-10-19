@@ -17,7 +17,7 @@ import (
 
 	"time"
 
-	"github.com/dnicolson/irestore/crypto/aeswrap"
+	"github.com/y52en/irestore_wasm/crypto/aeswrap"
 	"golang.org/x/crypto/pbkdf2"
 )
 

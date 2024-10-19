@@ -18,11 +18,11 @@ import (
 	"path"
 	"sort"
 
-	"github.com/dnicolson/irestore/crypto/aeswrap"
-	"github.com/dnicolson/irestore/keybag"
-	"github.com/dnicolson/irestore/kvarchive"
 	"github.com/dunhamsteve/plist"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/y52en/irestore_wasm/crypto/aeswrap"
+	"github.com/y52en/irestore_wasm/keybag"
+	"github.com/y52en/irestore_wasm/kvarchive"
 )
 
 var be = binary.BigEndian
